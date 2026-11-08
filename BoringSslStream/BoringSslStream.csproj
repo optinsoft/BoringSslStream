@@ -1,0 +1,55 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+
+    <!-- NuGet package metadata -->
+    <PackageId>BoringSslStream</PackageId>
+    <Version>1.0.0</Version>
+    <Authors>Vitaly Yakovlev (optinsoft)</Authors>
+    <Owners>optinsoft</Owners>
+    <Copyright>Copyright © Vitaly Yakovlev, vitaly@optinsoft.net</Copyright>
+    <Description>.NET TLS stream backed by BoringSSL with Chrome-like JA4 fingerprints and native HTTP/2 support.</Description>
+    <PackageTags>tls;ssl;boringssl;ja4;http2;fingerprinting</PackageTags>
+    <PackageLicenseFile>LICENSE</PackageLicenseFile>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <RepositoryUrl>https://github.com/optinsoft/BoringSslStream.git</RepositoryUrl>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Native library: .dll for Windows, .so for Linux.
+         For local builds it is copied flat to the output directory (DllImport
+         probes there; CopyToOutputDirectory items flow transitively through
+         ProjectReference). When packed, NuGet places it under
+         runtimes/{RID}/native/ so consumers get the right binary automatically. -->
+    <None Include="../Native/build/proxymap_boringssl.dll"
+          Link="proxymap_boringssl.dll"
+          CopyToOutputDirectory="PreserveNewest"
+          Pack="true"
+          PackagePath="runtimes/win-x64/native"
+          Condition="Exists('../Native/build/proxymap_boringssl.dll')" />
+    <None Include="../Native/build/libproxymap_boringssl.so"
+          Link="libproxymap_boringssl.so"
+          CopyToOutputDirectory="PreserveNewest"
+          Pack="true"
+          PackagePath="runtimes/linux-x64/native"
+          Condition="Exists('../Native/build/libproxymap_boringssl.so')" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="../LICENSE" Pack="true" PackagePath="/" />
+    <None Include="../README.md" Pack="true" PackagePath="/" />
+  </ItemGroup>
+
+  <Target Name="EnsureNativeLibrary" BeforeTargets="Build"
+          Condition="!Exists('../Native/build/proxymap_boringssl.dll') AND !Exists('../Native/build/libproxymap_boringssl.so')">
+    <Warning Text="Native library not found in ../Native/build. Run Native/build.ps1 (Windows) or Native/build.sh (Linux) first." />
+  </Target>
+
+</Project>
