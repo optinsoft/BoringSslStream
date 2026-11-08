@@ -12,8 +12,8 @@
   </ItemGroup>
 
   <Target Name="EnsureNativeLibrary" BeforeTargets="Build"
-          Condition="!Exists('../Native/build/proxymap_boringssl.dll') AND !Exists('../Native/build/libproxymap_boringssl.so')">
-    <Warning Text="Native library not found in ../Native/build. Run Native/build.ps1 (Windows) or Native/build.sh (Linux) first." />
+          Condition="!Exists('../Native/build/proxymap_boringssl.dll') AND !Exists('../Native/build/libproxymap_boringssl.so') AND !Exists('../Native/build/libproxymap_boringssl.dylib')">
+    <Warning Text="Native library not found in ../Native/build. Run Native/build.ps1 (Windows), Native/build.sh (Linux/macOS) first." />
   </Target>
 
 </Project>
