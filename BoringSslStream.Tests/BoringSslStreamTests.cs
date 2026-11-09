@@ -229,7 +229,7 @@ public sealed class BoringSslStreamTests
                 new SslServerAuthenticationOptions
                 {
                     ServerCertificate = certificate,
-                    EnabledSslProtocols = SslProtocols.Tls13
+                    EnabledSslProtocols = SslProtocols.None
                 },
                 cts.Token);
 

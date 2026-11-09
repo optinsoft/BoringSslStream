@@ -61,7 +61,20 @@ public sealed class BoringSslStream : Stream
 
     // SslClientAuthenticationOptions-compatible managed validation.
     private RemoteCertificateValidationCallback? _sslValidationCallback;
-    private X509RevocationMode _revocationMode = X509RevocationMode.Online;
+
+    // X509RevocationMode.Online is not supported on macOS: the platform chain
+    // builder cannot fetch CRL/OCSP data on demand and the chain build fails
+    // with "An incomplete certificate revocation check occurred"
+    // (CRYPT_E_NO_REVOCATION_CHECK). Downgrade to NoCheck there so the OS
+    // trust store decision still applies.
+    private static X509RevocationMode NormalizeRevocationMode(X509RevocationMode mode) =>
+        OperatingSystem.IsMacOS() && mode == X509RevocationMode.Online
+            ? X509RevocationMode.NoCheck
+            : mode;
+
+    private X509RevocationMode _revocationMode = OperatingSystem.IsMacOS()
+        ? X509RevocationMode.NoCheck
+        : X509RevocationMode.Online;
 
     // SSL* is not accessed concurrently.
     private readonly SemaphoreSlim _readLock = new(1, 1);
@@ -237,7 +250,7 @@ public sealed class BoringSslStream : Stream
         }
 
         _sslValidationCallback = options.RemoteCertificateValidationCallback;
-        _revocationMode = options.CertificateRevocationCheckMode;
+        _revocationMode = NormalizeRevocationMode(options.CertificateRevocationCheckMode);
 
         if (options.EnabledSslProtocols is { } enabledProtocols &&
             enabledProtocols != SslProtocols.None &&
