@@ -24,3 +24,5 @@ output/
 *.bak/
 
 .tmp/
+
+.DS_Store
