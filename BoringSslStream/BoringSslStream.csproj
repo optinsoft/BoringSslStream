@@ -26,8 +26,13 @@
          Override on the command line for other architectures:
          dotnet pack -p:MacNativeRuntimeIdentifier=osx-x64
          dotnet pack -p:LinuxNativeRuntimeIdentifier=linux-arm64 -->
-    <MacNativeRuntimeIdentifier Condition="'$(MacNativeRuntimeIdentifier)' == ''">osx-arm64</MacNativeRuntimeIdentifier>
-    <LinuxNativeRuntimeIdentifier Condition="'$(LinuxNativeRuntimeIdentifier)' == ''">linux-x64</LinuxNativeRuntimeIdentifier>
+    <CurrentHostRid>$([System.Runtime.InteropServices.RuntimeInformation]::RuntimeIdentifier)</CurrentHostRid>
+
+    <EffectiveRid Condition="'$(RuntimeIdentifier)' != ''">$(RuntimeIdentifier)</EffectiveRid>
+    <EffectiveRid Condition="'$(EffectiveRid)' == ''">$(CurrentHostRid)</EffectiveRid>
+
+    <MacNativeRuntimeIdentifier Condition="'$(MacNativeRuntimeIdentifier)' == '' AND $(EffectiveRid.StartsWith('osx'))">$(EffectiveRid)</MacNativeRuntimeIdentifier>
+    <LinuxNativeRuntimeIdentifier Condition="'$(LinuxNativeRuntimeIdentifier)' == '' AND $(EffectiveRid.StartsWith('linux'))">$(EffectiveRid)</LinuxNativeRuntimeIdentifier>
   </PropertyGroup>
 
   <ItemGroup>
@@ -62,7 +67,7 @@
   </ItemGroup>
 
   <Target Name="EnsureNativeLibrary" BeforeTargets="Build"
-          Condition="!Exists('../Native/build/win-x64/proxymap_boringssl.dll') AND !Exists('../Native/build/linux-x64/libproxymap_boringssl.so') AND !Exists('../Native/build/osx-arm64/libproxymap_boringssl.dylib')">
+          Condition="!Exists('../Native/build/win-x64/proxymap_boringssl.dll') AND !Exists('../Native/build/linux-x64/libproxymap_boringssl.so') AND !Exists('../Native/build/linux-arm64/libproxymap_boringssl.so') AND !Exists('../Native/build/osx-arm64/libproxymap_boringssl.dylib')">
     <Warning Text="Native library not found under ../Native/build/&lt;rid&gt;. Run Native/build.ps1 (Windows) or Native/build.sh (Linux/macOS) first." />
   </Target>
 
