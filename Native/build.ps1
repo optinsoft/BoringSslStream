@@ -8,11 +8,24 @@ Set-Location $PSScriptRoot
 
 $BuildDir = Join-Path "build" $Rid
 
+switch ($Rid) {
+    "win-x64"   { $VsArch = "amd64"; $ClTarget = "x64" }
+    "win-x86"   { $VsArch = "x86";   $ClTarget = "x86" }
+    "win-arm64" { $VsArch = "arm64"; $ClTarget = "ARM64" }
+    default     { throw "Unsupported RID: $Rid" }
+}
+
 # --- Ensure MSVC (cl.exe) is on PATH ------------------------------------
 # Without this, CMake may silently pick gcc/MinGW from PATH and produce
 # a dll with a different name / runtime. Prefer MSVC explicitly.
 
-if (-not (Get-Command cl.exe -ErrorAction SilentlyContinue)) {
+function Test-ClTarget([string]$target) {
+    if (-not (Get-Command cl.exe -ErrorAction SilentlyContinue)) { return $false }
+    $banner = (& cl.exe 2>&1 | Out-String)
+    return $banner -match "for $target"
+}
+
+if (-not (Test-ClTarget $ClTarget)) {
     $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
 
     if (-not (Test-Path $vswhere)) {
@@ -34,7 +47,11 @@ if (-not (Get-Command cl.exe -ErrorAction SilentlyContinue)) {
         throw "Launch-VsDevShell.ps1 was not found in $vsPath."
     }
 
-    & $devShell -Arch amd64 -HostArch amd64 | Out-Null
+    & $devShell -Arch amd64 -HostArch amd64 -SkipAutomaticLocation | Out-Null
+
+    if (-not (Test-ClTarget $ClTarget)) {
+        throw "cl.exe does not target $ClTarget. Open a NEW PowerShell window (not a pre-configured VS prompt) and retry."
+    }
 }
 
 # --- Configure and build (Ninja, single-config) --------------------------
@@ -44,15 +61,17 @@ Remove-Item -Recurse -Force $BuildDir -ErrorAction SilentlyContinue
 # Pin the compiler to cl.exe so gcc from PATH is never picked.
 cmake -G Ninja -B $BuildDir -DCMAKE_BUILD_TYPE=Release `
     -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 cmake --build $BuildDir
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # --- Sanity check: DLL name must match the P/Invoke name -----------------
 
 $dll = Join-Path $BuildDir "proxymap_boringssl.dll"
 
 if (-not (Test-Path $dll)) {
-    Write-Warning "Expected $BuildDir\proxymap_boringssl.dll was not produced. Check the build output above."
+    Write-Warning "Expected $dll was not produced. Check the build output above."
 } else {
     Write-Host "OK: $dll"
 }
