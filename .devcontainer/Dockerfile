@@ -1,4 +1,4 @@
-FROM mcr.microsoft.com/devcontainers/dotnet:2-8.0
+FROM mcr.microsoft.com/devcontainers/dotnet:2-8.0-noble
 
 RUN apt-get update && apt-get install -y \
     cmake \
