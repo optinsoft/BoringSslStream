@@ -132,12 +132,28 @@ cd Native
 ./build.sh
 ```
 
+macOS (Apple Silicon by default):
+
+```bash
+cd Native
+./build.sh                 # -> build/osx-arm64
+RID=osx-x64 ./build.sh     # Intel Macs -> build/osx-x64
+```
+
+Each platform builds into its own directory:
+
+- `Native/build/win-x64/` — `proxymap_boringssl.dll` (Windows)
+- `Native/build/linux-x64/` or `Native/build/linux-arm64/` — `libproxymap_boringssl.so` (Linux;
+  override the RID with `RID=linux-arm64 ./build.sh`)
+- `Native/build/osx-arm64/` or `Native/build/osx-x64/` — `libproxymap_boringssl.dylib` (macOS)
+
 The project builds its own copy of BoringSSL and links the Brotli
 decoder/encoder components statically into a single, fully autonomous
-`proxymap_boringssl.dll` (Windows) / `libproxymap_boringssl.so` (Linux) to
-prevent runtime `DllNotFoundException` errors.
+`proxymap_boringssl.dll` (Windows) / `libproxymap_boringssl.so` (Linux) /
+`libproxymap_boringssl.dylib` (macOS) to prevent runtime `DllNotFoundException`
+errors.
 
-> **Note:** build both platforms from the same source revision so that the
+> **Note:** build all platforms from the same source revision so that the
 > shipped binaries are in sync with the managed code.
 
 ### .NET build, tests and packing

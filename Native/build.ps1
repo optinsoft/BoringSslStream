@@ -1,4 +1,12 @@
+param(
+    # .NET RID for the output directory (build/win-x64 by default).
+    # Override for cross-arch builds:  .\build.ps1 -Rid win-arm64
+    [string]$Rid = "win-x64"
+)
+
 Set-Location $PSScriptRoot
+
+$BuildDir = Join-Path "build" $Rid
 
 # --- Ensure MSVC (cl.exe) is on PATH ------------------------------------
 # Without this, CMake may silently pick gcc/MinGW from PATH and produce
@@ -31,20 +39,20 @@ if (-not (Get-Command cl.exe -ErrorAction SilentlyContinue)) {
 
 # --- Configure and build (Ninja, single-config) --------------------------
 
-Remove-Item -Recurse -Force build -ErrorAction SilentlyContinue
+Remove-Item -Recurse -Force $BuildDir -ErrorAction SilentlyContinue
 
 # Pin the compiler to cl.exe so gcc from PATH is never picked.
-cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=Release `
+cmake -G Ninja -B $BuildDir -DCMAKE_BUILD_TYPE=Release `
     -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl
 
-cmake --build build
+cmake --build $BuildDir
 
 # --- Sanity check: DLL name must match the P/Invoke name -----------------
 
-$dll = Join-Path $PSScriptRoot "build\proxymap_boringssl.dll"
+$dll = Join-Path $BuildDir "proxymap_boringssl.dll"
 
 if (-not (Test-Path $dll)) {
-    Write-Warning "Expected build\proxymap_boringssl.dll was not produced. Check the build output above."
+    Write-Warning "Expected $BuildDir\proxymap_boringssl.dll was not produced. Check the build output above."
 } else {
     Write-Host "OK: $dll"
 }
