@@ -10,7 +10,7 @@
 
     <!-- NuGet package metadata -->
     <PackageId>BoringSslStream</PackageId>
-    <Version>1.0.3</Version>
+    <Version>1.0.4</Version>
     <Authors>Vitaly Yakovlev (optinsoft)</Authors>
     <Owners>optinsoft</Owners>
     <Copyright>Copyright © Vitaly Yakovlev, vitaly@optinsoft.net</Copyright>
@@ -20,19 +20,6 @@
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <RepositoryUrl>https://github.com/optinsoft/BoringSslStream.git</RepositoryUrl>
     <PublishRepositoryUrl>true</PublishRepositoryUrl>
-
-    <!-- RIDs used to package the native libraries. Each platform builds
-         into its own directory: Native/build/<rid>.
-         Override on the command line for other architectures:
-         dotnet pack -p:MacNativeRuntimeIdentifier=osx-x64
-         dotnet pack -p:LinuxNativeRuntimeIdentifier=linux-arm64 -->
-    <CurrentHostRid>$([System.Runtime.InteropServices.RuntimeInformation]::RuntimeIdentifier)</CurrentHostRid>
-
-    <EffectiveRid Condition="'$(RuntimeIdentifier)' != ''">$(RuntimeIdentifier)</EffectiveRid>
-    <EffectiveRid Condition="'$(EffectiveRid)' == ''">$(CurrentHostRid)</EffectiveRid>
-
-    <MacNativeRuntimeIdentifier Condition="'$(MacNativeRuntimeIdentifier)' == '' AND $(EffectiveRid.StartsWith('osx'))">$(EffectiveRid)</MacNativeRuntimeIdentifier>
-    <LinuxNativeRuntimeIdentifier Condition="'$(LinuxNativeRuntimeIdentifier)' == '' AND $(EffectiveRid.StartsWith('linux'))">$(EffectiveRid)</LinuxNativeRuntimeIdentifier>
   </PropertyGroup>
 
   <ItemGroup>
@@ -42,23 +29,21 @@
          ProjectReference). When packed, NuGet places it under
          runtimes/{RID}/native/ so consumers get the right binary automatically. -->
     <None Include="../Native/build/win-x64/proxymap_boringssl.dll"
-          Link="proxymap_boringssl.dll"
-          CopyToOutputDirectory="PreserveNewest"
           Pack="true"
           PackagePath="runtimes/win-x64/native"
           Condition="Exists('../Native/build/win-x64/proxymap_boringssl.dll')" />
-    <None Include="../Native/build/$(LinuxNativeRuntimeIdentifier)/libproxymap_boringssl.so"
-          Link="libproxymap_boringssl.so"
-          CopyToOutputDirectory="PreserveNewest"
+    <None Include="../Native/build/linux-x64/libproxymap_boringssl.so"
           Pack="true"
-          PackagePath="runtimes/$(LinuxNativeRuntimeIdentifier)/native"
-          Condition="Exists('../Native/build/$(LinuxNativeRuntimeIdentifier)/libproxymap_boringssl.so')" />
-    <None Include="../Native/build/$(MacNativeRuntimeIdentifier)/libproxymap_boringssl.dylib"
-          Link="libproxymap_boringssl.dylib"
-          CopyToOutputDirectory="PreserveNewest"
+          PackagePath="runtimes/linux-x64/native"
+          Condition="Exists('../Native/build/linux-x64/libproxymap_boringssl.so')" />
+    <None Include="../Native/build/linux-arm64/libproxymap_boringssl.so"
           Pack="true"
-          PackagePath="runtimes/$(MacNativeRuntimeIdentifier)/native"
-          Condition="Exists('../Native/build/$(MacNativeRuntimeIdentifier)/libproxymap_boringssl.dylib')" />
+          PackagePath="runtimes/linux-arm64/native"
+          Condition="Exists('../Native/build/linux-arm64/libproxymap_boringssl.so')" />
+	<None Include="../Native/build/osx-arm64/libproxymap_boringssl.dylib"
+          Pack="true"
+          PackagePath="runtimes/osx-arm64/native"
+          Condition="Exists('../Native/build/osx-arm64/libproxymap_boringssl.dylib')" />
   </ItemGroup>
 
   <ItemGroup>
@@ -66,8 +51,29 @@
     <None Include="../README.md" Pack="true" PackagePath="/" />
   </ItemGroup>
 
-  <Target Name="EnsureNativeLibrary" BeforeTargets="Build"
-          Condition="!Exists('../Native/build/win-x64/proxymap_boringssl.dll') AND !Exists('../Native/build/linux-x64/libproxymap_boringssl.so') AND !Exists('../Native/build/linux-arm64/libproxymap_boringssl.so') AND !Exists('../Native/build/osx-arm64/libproxymap_boringssl.dylib')">
+	<PropertyGroup>
+		<_HostArch>$([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture)</_HostArch>
+		<_NativeRid Condition="$([MSBuild]::IsOSPlatform('Windows')) AND '$(_HostArch)' == 'X64'">win-x64</_NativeRid>
+		<_NativeRid Condition="$([MSBuild]::IsOSPlatform('Linux')) AND '$(_HostArch)' == 'X64'">linux-x64</_NativeRid>
+		<_NativeRid Condition="$([MSBuild]::IsOSPlatform('Linux')) AND '$(_HostArch)' == 'Arm64'">linux-arm64</_NativeRid>
+		<_NativeRid Condition="$([MSBuild]::IsOSPlatform('OSX')) AND '$(_HostArch)' == 'Arm64'">osx-arm64</_NativeRid>
+		<_NativeFile Condition="'$(_NativeRid)' == 'win-x64'">proxymap_boringssl.dll</_NativeFile>
+		<_NativeFile Condition="$(_NativeRid.StartsWith('linux-'))">libproxymap_boringssl.so</_NativeFile>
+		<_NativeFile Condition="$(_NativeRid.StartsWith('osx-'))">libproxymap_boringssl.dylib</_NativeFile>
+	</PropertyGroup>
+
+	<ItemGroup Condition="'$(_NativeRid)' != '' AND Exists('../Native/build/$(_NativeRid)/$(_NativeFile)')">
+		<None Include="../Native/build/$(_NativeRid)/$(_NativeFile)"
+			  Link="$(_NativeFile)"
+			  CopyToOutputDirectory="PreserveNewest"
+			  Pack="false" />
+	</ItemGroup>
+
+	<Target Name="EnsureNativeLibrary" BeforeTargets="Build"
+          Condition="!Exists('../Native/build/win-x64/proxymap_boringssl.dll') 
+		    AND !Exists('../Native/build/linux-x64/libproxymap_boringssl.so') 
+			AND !Exists('../Native/build/linux-arm64/libproxymap_boringssl.so') 
+			AND !Exists('../Native/build/osx-arm64/libproxymap_boringssl.dylib')">
     <Warning Text="Native library not found under ../Native/build/&lt;rid&gt;. Run Native/build.ps1 (Windows) or Native/build.sh (Linux/macOS) first." />
   </Target>
 
