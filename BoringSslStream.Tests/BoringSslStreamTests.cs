@@ -1,11 +1,12 @@
+using BoringSsl;
+using System;
 using System.Net;
 using System.Net.Security;
 using System.Net.Sockets;
+using System.Security.Authentication;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
-using System.Security.Authentication;
 using System.Text;
-using BoringSsl;
 using Xunit;
 
 namespace BoringSsl.Tests;
@@ -614,7 +615,14 @@ public sealed class BoringSslStreamTests
                 DateTimeOffset.UtcNow.AddMinutes(-5),
                 DateTimeOffset.UtcNow.AddHours(1));
 
+#if NET9_0_OR_GREATER
+        return X509CertificateLoader.LoadPkcs12(
+            certificate.Export(X509ContentType.Pfx), 
+            null, 
+            X509KeyStorageFlags.Exportable);
+#else
         return new X509Certificate2(
             certificate.Export(X509ContentType.Pfx));
+#endif
     }
 }
