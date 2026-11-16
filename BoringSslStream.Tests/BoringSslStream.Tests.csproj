@@ -23,7 +23,10 @@
   </ItemGroup>
 
   <Target Name="EnsureNativeLibrary" BeforeTargets="Build"
-          Condition="!Exists('../Native/build/win-x64/proxymap_boringssl.dll') AND !Exists('../Native/build/linux-x64/libproxymap_boringssl.so') AND !Exists('../Native/build/osx-arm64/libproxymap_boringssl.dylib')">
+          Condition="!Exists('../Native/build/win-x64/proxymap_boringssl.dll') 
+		    AND !Exists('../Native/build/linux-x64/libproxymap_boringssl.so') 
+			AND !Exists('../Native/build/linux-arm64/libproxymap_boringssl.so')
+			AND !Exists('../Native/build/osx-arm64/libproxymap_boringssl.dylib')">
     <Warning Text="Native library not found under ../Native/build/&lt;rid&gt;. Run Native/build.ps1 (Windows) or Native/build.sh (Linux/macOS) first." />
   </Target>
 
