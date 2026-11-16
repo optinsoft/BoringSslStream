@@ -49,6 +49,8 @@ endpoints, and an **xUnit test suite** (`BoringSslStream.Tests`).
   payload encoding for pseudo-headers, and frame-level stream flow handling
   (DATA, HEADERS, SETTINGS, RST_STREAM, GOAWAY).
 
+The library multi-targets **.NET 8** and **.NET 9** (`net8.0;net9.0`).
+
 ## Installation
 
 The library ships as a self-contained NuGet package: the managed assembly and
@@ -106,7 +108,8 @@ git clone --recursive https://github.com/optinsoft/BoringSslStream.git
 
 Windows:
 
-- .NET 8 SDK
+- .NET 9 SDK (the solution multi-targets `net8.0` and `net9.0`; a .NET 9 SDK
+  is required to build the `net9.0` target)
 - Visual Studio 2022 with C++ tools (x64 toolset)
 - CMake 3.22+ and Ninja
 - Git, NASM, Go
