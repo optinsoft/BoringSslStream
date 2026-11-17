@@ -10,6 +10,9 @@
 #include <unordered_map>
 #include <cstring>
 
+#include <memory>
+#include <new>
+
 #include <brotli/decode.h>
 #include <brotli/encode.h>
 
@@ -18,6 +21,12 @@ struct PmsSslConnection
     SSL_CTX* ctx = nullptr;
     SSL* ssl = nullptr;
     std::string hostname;
+
+    ~PmsSslConnection()
+    {
+        if (ssl) SSL_free(ssl);
+        if (ctx) SSL_CTX_free(ctx);
+    }
 };
 
 static thread_local std::string g_last_error;
@@ -43,6 +52,8 @@ static void SetOpenSslError(const char* prefix)
         error,
         error_string,
         sizeof(error_string));
+
+    ERR_clear_error();   // drop the rest of the queue
 
     g_last_error =
         std::string(prefix ? prefix : "OpenSSL error") +
@@ -194,6 +205,28 @@ static int DecompressBrotli(SSL*, CRYPTO_BUFFER **out, size_t uncompressed_len,
     return 1;
 }
 
+static bool ParseHex(const char* s, std::vector<uint8_t>& out)
+{
+    size_t len = strlen(s);
+    if (len % 2 != 0) return false;
+
+    auto nibble = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+        };
+
+    out.reserve(len / 2);
+    for (size_t i = 0; i < len; i += 2)
+    {
+        int hi = nibble(s[i]), lo = nibble(s[i + 1]);
+        if (hi < 0 || lo < 0) return false;
+        out.push_back(static_cast<uint8_t>((hi << 4) | lo));
+    }
+    return true;
+}
+
 extern "C"
 {
 
@@ -210,240 +243,224 @@ PMS_EXPORT void* PMS_CALL pms_ssl_create(
     int set_ocsp_status_type,
     int enable_brotli)
 {
-    if (!hostname || !hostname[0])
+    try
     {
-        SetLastError("Hostname is empty");
-        return nullptr;
-    }
 
-    auto* connection = new PmsSslConnection();
-
-    connection->hostname = hostname;
-
-    connection->ctx = SSL_CTX_new(TLS_client_method());
-
-    if (!connection->ctx)
-    {
-        SetOpenSslError("SSL_CTX_new failed");
-        delete connection;
-        return nullptr;
-    }
-
-    // POC only.
-    // Certificate verification should be enabled later.
-    SSL_CTX_set_verify(
-        connection->ctx,
-        SSL_VERIFY_NONE,
-        nullptr);
-
-    if (enable_grease) 
-    {
-        SSL_CTX_set_grease_enabled(connection->ctx, 1);
-        SSL_CTX_set_grease_sigalgs_enabled(connection->ctx, 1);
-        SSL_CTX_set_permute_extensions(connection->ctx, 1);
-    }
-
-    if (cipher_list && cipher_list[0])
-    {
-        if (SSL_CTX_set_cipher_list(connection->ctx, cipher_list) != 1)
+        if (!hostname || !hostname[0])
         {
-            SetOpenSslError("SSL_CTX_set_cipher_list failed");
-            SSL_CTX_free(connection->ctx);
-            delete connection;
+            SetLastError("Hostname is empty");
             return nullptr;
         }
-    }
 
-    std::vector<std::string> alpn_protocols = ParseProtos(alpn_protos);
-
-    if (!alpn_protocols.empty())
-    {
-        std::vector<uint8_t> alpn_wire_format;
-        for (const auto& proto : alpn_protocols)
+        std::unique_ptr<PmsSslConnection> connection(new (std::nothrow) PmsSslConnection());
+        if (!connection)
         {
-            alpn_wire_format.push_back(static_cast<uint8_t>(proto.length()));
-            alpn_wire_format.insert(alpn_wire_format.end(), proto.begin(), proto.end());
-        }
-
-        if (SSL_CTX_set_alpn_protos(
-            connection->ctx, 
-            alpn_wire_format.data(), 
-            static_cast<unsigned>(alpn_wire_format.size())) != 0)
-        {
-            SetOpenSslError("SSL_CTX_set_alpn_protos failed");
-            SSL_CTX_free(connection->ctx);
-            delete connection;
+            SetLastError("Out of memory");
             return nullptr;
         }
-    }
 
-    if (enable_signed_cert_timestamps) 
-    {
-        SSL_CTX_enable_signed_cert_timestamps(connection->ctx);
-    }
+        connection->hostname = hostname;
 
-    if (trust_anchors && trust_anchors[0])
-    {
-        size_t len = strlen(trust_anchors);
+        connection->ctx = SSL_CTX_new(TLS_client_method());
 
-        std::vector<uint8_t> ta_ids; 
-        ta_ids.reserve(len / 2);
-
-        for (size_t i = 0; i < len; i += 2) {
-            char byte_chars[3] = { trust_anchors[i], trust_anchors[i + 1], '\0' };
-            uint8_t byte = static_cast<uint8_t>(strtoul(byte_chars, nullptr, 16));
-            ta_ids.push_back(byte);
-        }
-
-        if (SSL_CTX_set1_requested_trust_anchors(
-            connection->ctx, 
-            ta_ids.data(), 
-            static_cast<unsigned>(ta_ids.size())) != 1)
+        if (!connection->ctx)
         {
-            SetOpenSslError("SSL_CTX_set1_requested_trust_anchors failed");
-            SSL_CTX_free(connection->ctx);
-            delete connection;
-            return nullptr;        
-        }
-    }
-
-    std::vector<uint16_t> sigalgs = ParseSignatureAlgorithms(sig_algs);
-
-    if (enable_brotli)
-    {
-        if (SSL_CTX_add_cert_compression_alg(
-            connection->ctx, 
-            2, // TLSEXT_cert_compression_brotli
-            CompressBrotli, 
-            DecompressBrotli) != 1)
-        {
-            SetOpenSslError("Failed to enable built-in Brotli compression");
-            SSL_CTX_free(connection->ctx);
-            delete connection;
+            SetOpenSslError("SSL_CTX_new failed");
             return nullptr;
         }
-    }
 
-    connection->ssl = SSL_new(connection->ctx);
+        // POC only.
+        // Certificate verification should be enabled later.
+        SSL_CTX_set_verify(
+            connection->ctx,
+            SSL_VERIFY_NONE,
+            nullptr);
 
-    if (!connection->ssl)
-    {
-        SetOpenSslError("SSL_new failed");
-        SSL_CTX_free(connection->ctx);
-        delete connection;
-        return nullptr;
-    }
-
-    if (enable_ech_grease) 
-    {
-        SSL_set_enable_ech_grease(connection->ssl, 1);
-    }
-
-    if (set_ocsp_status_type)
-    {
-        if (SSL_set_tlsext_status_type(connection->ssl, TLSEXT_STATUSTYPE_ocsp) != 1)
+        if (enable_grease)
         {
-            SetOpenSslError("SSL_set_tlsext_status_type failed");
-            SSL_free(connection->ssl);
-            SSL_CTX_free(connection->ctx);
-            delete connection;
-            return nullptr;
-        }    
-    }
+            SSL_CTX_set_grease_enabled(connection->ctx, 1);
+            SSL_CTX_set_grease_sigalgs_enabled(connection->ctx, 1);
+            SSL_CTX_set_permute_extensions(connection->ctx, 1);
+        }
 
-    std::vector<std::string> alps_protocols = ParseProtos(alps_protos);
-
-    if (!alps_protocols.empty())
-    {
-        const uint8_t empty_settings[] = { 0 };
-
-        for (const auto& proto : alps_protocols)
+        if (cipher_list && cipher_list[0])
         {
-            if (SSL_add_application_settings(
-                    connection->ssl, 
-                    reinterpret_cast<const uint8_t*>(proto.data()), 
-                    static_cast<int>(proto.length()), 
-                    empty_settings, 0) != 1)
+            if (SSL_CTX_set_cipher_list(connection->ctx, cipher_list) != 1)
             {
-                SetOpenSslError("SSL_add_application_settings failed");
-                SSL_free(connection->ssl);
-                SSL_CTX_free(connection->ctx);
-                delete connection;
-                return nullptr;            
+                SetOpenSslError("SSL_CTX_set_cipher_list failed");
+                return nullptr;
             }
         }
-    }
 
-    if (!sigalgs.empty())
-    {
-        if (SSL_set_verify_algorithm_prefs(
-            connection->ssl, 
-            sigalgs.data(), 
-            sigalgs.size()) != 1)
+        std::vector<std::string> alpn_protocols = ParseProtos(alpn_protos);
+
+        if (!alpn_protocols.empty())
         {
-            SetOpenSslError("SSL_set_verify_algorithm_prefs failed");
-            SSL_free(connection->ssl);
-            SSL_CTX_free(connection->ctx);
-            delete connection;
+            std::vector<uint8_t> alpn_wire_format;
+            for (const auto& proto : alpn_protocols)
+            {
+                alpn_wire_format.push_back(static_cast<uint8_t>(proto.length()));
+                alpn_wire_format.insert(alpn_wire_format.end(), proto.begin(), proto.end());
+            }
+
+            if (SSL_CTX_set_alpn_protos(
+                connection->ctx,
+                alpn_wire_format.data(),
+                static_cast<unsigned>(alpn_wire_format.size())) != 0)
+            {
+                SetOpenSslError("SSL_CTX_set_alpn_protos failed");
+                return nullptr;
+            }
+        }
+
+        if (enable_signed_cert_timestamps)
+        {
+            SSL_CTX_enable_signed_cert_timestamps(connection->ctx);
+        }
+
+        if (trust_anchors && trust_anchors[0])
+        {
+            std::vector<uint8_t> ta_ids;
+
+            if (!ParseHex(trust_anchors, ta_ids))
+            {
+                SetLastError("trust_anchors must be an even-length hex string");
+                return nullptr;
+            }
+
+            if (SSL_CTX_set1_requested_trust_anchors(
+                connection->ctx,
+                ta_ids.data(),
+                static_cast<unsigned>(ta_ids.size())) != 1)
+            {
+                SetOpenSslError("SSL_CTX_set1_requested_trust_anchors failed");
+                return nullptr;
+            }
+        }
+
+        std::vector<uint16_t> sigalgs = ParseSignatureAlgorithms(sig_algs);
+
+        if (enable_brotli)
+        {
+            if (SSL_CTX_add_cert_compression_alg(
+                connection->ctx,
+                2, // TLSEXT_cert_compression_brotli
+                CompressBrotli,
+                DecompressBrotli) != 1)
+            {
+                SetOpenSslError("Failed to enable built-in Brotli compression");
+                return nullptr;
+            }
+        }
+
+        connection->ssl = SSL_new(connection->ctx);
+
+        if (!connection->ssl)
+        {
+            SetOpenSslError("SSL_new failed");
             return nullptr;
         }
 
-        if (SSL_set_signing_algorithm_prefs(
-            connection->ssl, 
-            sigalgs.data(), 
-            sigalgs.size()) != 1)
+        if (enable_ech_grease)
         {
-            SetOpenSslError("SSL_set_signing_algorithm_prefs failed");
-            SSL_free(connection->ssl);
-            SSL_CTX_free(connection->ctx);
-            delete connection;
+            SSL_set_enable_ech_grease(connection->ssl, 1);
+        }
+
+        if (set_ocsp_status_type)
+        {
+            if (SSL_set_tlsext_status_type(connection->ssl, TLSEXT_STATUSTYPE_ocsp) != 1)
+            {
+                SetOpenSslError("SSL_set_tlsext_status_type failed");
+                return nullptr;
+            }
+        }
+
+        std::vector<std::string> alps_protocols = ParseProtos(alps_protos);
+
+        if (!alps_protocols.empty())
+        {
+            const uint8_t empty_settings[] = { 0 };
+
+            for (const auto& proto : alps_protocols)
+            {
+                if (SSL_add_application_settings(
+                    connection->ssl,
+                    reinterpret_cast<const uint8_t*>(proto.data()),
+                    static_cast<int>(proto.length()),
+                    empty_settings, 0) != 1)
+                {
+                    SetOpenSslError("SSL_add_application_settings failed");
+                    return nullptr;
+                }
+            }
+        }
+
+        if (!sigalgs.empty())
+        {
+            if (SSL_set_verify_algorithm_prefs(
+                connection->ssl,
+                sigalgs.data(),
+                sigalgs.size()) != 1)
+            {
+                SetOpenSslError("SSL_set_verify_algorithm_prefs failed");
+                return nullptr;
+            }
+
+            if (SSL_set_signing_algorithm_prefs(
+                connection->ssl,
+                sigalgs.data(),
+                sigalgs.size()) != 1)
+            {
+                SetOpenSslError("SSL_set_signing_algorithm_prefs failed");
+                return nullptr;
+            }
+        }
+
+        BIO* read_bio = BIO_new(BIO_s_mem());
+        BIO* write_bio = BIO_new(BIO_s_mem());
+
+        if (!read_bio || !write_bio)
+        {
+            if (read_bio)
+                BIO_free(read_bio);
+
+            if (write_bio)
+                BIO_free(write_bio);
+
+            SetOpenSslError("BIO_new failed");
+
             return nullptr;
         }
-    }    
 
-    BIO* read_bio = BIO_new(BIO_s_mem());
-    BIO* write_bio = BIO_new(BIO_s_mem());
+        // SSL now owns both BIOs.
+        SSL_set_bio(
+            connection->ssl,
+            read_bio,
+            write_bio);
 
-    if (!read_bio || !write_bio)
-    {
-        if (read_bio)
-            BIO_free(read_bio);
-
-        if (write_bio)
-            BIO_free(write_bio);
-
-        SetOpenSslError("BIO_new failed");
-
-        SSL_free(connection->ssl);
-        SSL_CTX_free(connection->ctx);
-        delete connection;
-
-        return nullptr;
-    }
-
-    // SSL now owns both BIOs.
-    SSL_set_bio(
-        connection->ssl,
-        read_bio,
-        write_bio);
-
-    if (SSL_set_tlsext_host_name(
+        if (SSL_set_tlsext_host_name(
             connection->ssl,
             connection->hostname.c_str()) != 1)
+        {
+            SetOpenSslError(
+                "SSL_set_tlsext_host_name failed");
+
+            return nullptr;
+        }
+
+        SSL_set_connect_state(connection->ssl);
+
+        return connection.release();
+
+    }
+    catch (...)
     {
-        SetOpenSslError(
-            "SSL_set_tlsext_host_name failed");
-
-        SSL_free(connection->ssl);
-        SSL_CTX_free(connection->ctx);
-        delete connection;
-
+        try 
+        { 
+            SetLastError("Unexpected native exception (out of memory?)"); 
+        } catch (...) {}
         return nullptr;
     }
-
-    SSL_set_connect_state(connection->ssl);
-
-    return connection;
 }
 
 PMS_EXPORT int PMS_CALL pms_ssl_connect(
@@ -454,6 +471,8 @@ PMS_EXPORT int PMS_CALL pms_ssl_connect(
         SetLastError("Connection is null");
         return PMS_SSL_ERROR;
     }
+
+    ERR_clear_error();
 
     auto* connection =
         static_cast<PmsSslConnection*>(connection_ptr);
@@ -482,6 +501,12 @@ PMS_EXPORT int PMS_CALL pms_ssl_feed_read(
     if (!buffer && length > 0)
     {
         SetLastError("Buffer is null");
+        return PMS_SSL_ERROR;
+    }
+
+    if (length < 0)
+    {
+        SetLastError("Invalid length");
         return PMS_SSL_ERROR;
     }
 
@@ -527,6 +552,12 @@ PMS_EXPORT int PMS_CALL pms_ssl_take_write(
     if (!buffer && length > 0)
     {
         SetLastError("Buffer is null");
+        return PMS_SSL_ERROR;
+    }
+
+    if (length < 0)
+    {
+        SetLastError("Invalid length");
         return PMS_SSL_ERROR;
     }
 
@@ -594,11 +625,19 @@ PMS_EXPORT int PMS_CALL pms_ssl_read(
         return PMS_SSL_ERROR;
     }
 
-    if (!buffer && length > 0)
+    if (length <= 0)
+    {
+        SetLastError("Invalid length");
+        return PMS_SSL_ERROR;
+    }
+
+    if (!buffer)
     {
         SetLastError("Buffer is null");
         return PMS_SSL_ERROR;
     }
+
+    ERR_clear_error();
 
     auto* connection =
         static_cast<PmsSslConnection*>(connection_ptr);
@@ -627,11 +666,19 @@ PMS_EXPORT int PMS_CALL pms_ssl_write(
         return PMS_SSL_ERROR;
     }
 
-    if (!buffer && length > 0)
+    if (length <= 0)
+    {
+        SetLastError("Invalid length");
+        return PMS_SSL_ERROR;
+    }
+
+    if (!buffer)
     {
         SetLastError("Buffer is null");
         return PMS_SSL_ERROR;
     }
+
+    ERR_clear_error();
 
     auto* connection =
         static_cast<PmsSslConnection*>(connection_ptr);
@@ -725,12 +772,6 @@ PMS_EXPORT void PMS_CALL pms_ssl_free(
 
     auto* connection =
         static_cast<PmsSslConnection*>(connection_ptr);
-
-    if (connection->ssl)
-        SSL_free(connection->ssl);
-
-    if (connection->ctx)
-        SSL_CTX_free(connection->ctx);
 
     delete connection;
 }

@@ -43,11 +43,8 @@ public sealed partial class BoringSslStream : Stream
     private readonly Stream _innerStream;
     private string _hostname;
     private readonly bool _leaveOpen;
-    private Native.SslHandle _connection = new();
+    private readonly Native.SslHandle _connection = new();
 
-    // Parameters captured for the native connection factory, so the
-    // connection can be re-created when SslClientAuthenticationOptions
-    // override the constructor defaults before the handshake starts.
     private readonly string _cipherList;
     private readonly int _enableGrease;
     private readonly int _enableEchGrease;
@@ -91,8 +88,6 @@ public sealed partial class BoringSslStream : Stream
     // Only the pump moves bytes from the BoringSSL write BIO to the inner
     // stream, so the order of TLS records is preserved without any network
     // write lock, and a reader never has to wait for a blocked socket write.
-    private readonly byte[] _pumpBuffer =
-        GC.AllocateArray<byte>(NetworkBufferSize, pinned: true);
 
     private readonly Channel<bool> _flushSignal =
         Channel.CreateBounded<bool>(
@@ -150,10 +145,6 @@ public sealed partial class BoringSslStream : Stream
         _enableSignedCertTimestamps = enableSignedCertTimestamps;
         _setOcspStatusType = setOcspStatusType;
         _enableBrotli = enableBrotli;
-
-        var connection = CreateConnection(hostname, alpnProtos);
-
-        Marshal.InitHandle(_connection, connection);
     }
 
     private IntPtr CreateConnection(string hostname, string alpnProtos)
@@ -182,32 +173,10 @@ public sealed partial class BoringSslStream : Stream
     }
 
     /// <summary>
-    /// Re-creates the native SSL connection with a new target host and/or
-    /// ALPN list. Only allowed before the handshake has started.
-    /// </summary>
-    private void RecreateConnection(string hostname, string alpnProtos)
-    {
-        if (_pumpTask is not null || _authenticated)
-        {
-            throw new InvalidOperationException(
-                "SSL options can only be applied before the handshake starts.");
-        }
-
-        _connection.Dispose();
-
-        var handle = new Native.SslHandle();
-        Marshal.InitHandle(handle, CreateConnection(hostname, alpnProtos));
-
-        _hostname = hostname;
-        _alpnProtos = alpnProtos;
-        _connection = handle;
-    }
-
-    /// <summary>
     /// SslStream-compatible overload. Maps a subset of
     /// SslClientAuthenticationOptions onto BoringSslStream:
-    /// TargetHost and ApplicationProtocols (re-creates the native
-    /// connection), RemoteCertificateValidationCallback and
+    /// TargetHost and ApplicationProtocols, 
+    /// RemoteCertificateValidationCallback and
     /// CertificateRevocationCheckMode (managed validation).
     /// </summary>
     public ValueTask AuthenticateAsClientAsync(
@@ -224,34 +193,16 @@ public sealed partial class BoringSslStream : Stream
 
     private void ApplyClientOptions(SslClientAuthenticationOptions options)
     {
+        ThrowIfDisposed();
+
         if (_pumpTask is not null || _authenticated)
         {
             throw new InvalidOperationException(
                 "SSL options can only be applied before the handshake starts.");
         }
 
-        string hostname = _hostname;
-        if (!string.IsNullOrEmpty(options.TargetHost) &&
-            !string.Equals(options.TargetHost, _hostname, StringComparison.OrdinalIgnoreCase))
-        {
-            hostname = options.TargetHost;
-        }
-
-        string alpnProtos = _alpnProtos;
-        if (options.ApplicationProtocols is { Count: > 0 } applicationProtocols)
-        {
-            alpnProtos = string.Join(":", applicationProtocols.Select(p => Encoding.UTF8.GetString(p.Protocol.Span)));
-        }
-
-        if (!string.Equals(hostname, _hostname, StringComparison.Ordinal) ||
-            !string.Equals(alpnProtos, _alpnProtos, StringComparison.Ordinal))
-        {
-            RecreateConnection(hostname, alpnProtos);
-        }
-
-        _sslValidationCallback = options.RemoteCertificateValidationCallback;
-        _revocationMode = NormalizeRevocationMode(options.CertificateRevocationCheckMode);
-
+        // First, check for unsupported options, so that if an error occurs,
+        // the stream state remains unchanged.
         if (options.EnabledSslProtocols is { } enabledProtocols &&
             enabledProtocols != SslProtocols.None &&
             (enabledProtocols & (SslProtocols.Tls12 | SslProtocols.Tls13)) == 0)
@@ -272,6 +223,22 @@ public sealed partial class BoringSslStream : Stream
             throw new NotSupportedException(
                 "Local certificate selection is not supported by BoringSslStream.");
         }
+
+        // The native connection is created lazily within AuthenticateAsClientAsync,
+        // so it suffices to simply store the parameters here.
+        if (!string.IsNullOrEmpty(options.TargetHost) &&
+            !string.Equals(options.TargetHost, _hostname, StringComparison.OrdinalIgnoreCase))
+        {
+            _hostname = options.TargetHost;
+        }
+
+        if (options.ApplicationProtocols is { Count: > 0 } applicationProtocols)
+        {
+            _alpnProtos = string.Join(":", applicationProtocols.Select(p => Encoding.UTF8.GetString(p.Protocol.Span)));
+        }
+
+        _sslValidationCallback = options.RemoteCertificateValidationCallback;
+        _revocationMode = NormalizeRevocationMode(options.CertificateRevocationCheckMode);
     }
 
     public string ProtocolVersion
@@ -332,14 +299,24 @@ public sealed partial class BoringSslStream : Stream
 
         try
         {
+            ThrowIfDisposed();
+
             await _writeLock.WaitAsync(cancellationToken)
                 .ConfigureAwait(false);
                 
             try
             {
+                ThrowIfDisposed();
 
                 if (_authenticated)
                     return;
+
+                lock (_nativeSync)
+                {
+                    ThrowIfDisposed();
+                    if (_connection.IsInvalid)
+                        Marshal.InitHandle(_connection, CreateConnection(_hostname, _alpnProtos));
+                }
 
                 _pumpTask ??= Task.Run(PumpLoopAsync);
 
@@ -370,9 +347,12 @@ public sealed partial class BoringSslStream : Stream
                             return;
 
                         case Native.PMS_SSL_WANT_READ:
-                            await ReadFromNetworkAsync(
+                            if (!await ReadFromNetworkAsync(
                                     cancellationToken)
-                                .ConfigureAwait(false);
+                                .ConfigureAwait(false))
+                            {
+                                throw new EndOfStreamException("Underlying stream was closed during the handshake.");
+                            }
                             break;
 
                         case Native.PMS_SSL_WANT_WRITE:
@@ -416,6 +396,8 @@ public sealed partial class BoringSslStream : Stream
 
         try
         {
+            ThrowIfDisposed();
+
             EnsureAuthenticated();
 
             using MemoryHandle handle = buffer.Pin();
@@ -470,9 +452,12 @@ public sealed partial class BoringSslStream : Stream
                     return 0;
 
                 case Native.PMS_SSL_WANT_READ:
-                    await ReadFromNetworkAsync(
+                    if (!await ReadFromNetworkAsync(
                             cancellationToken)
-                        .ConfigureAwait(false);
+                        .ConfigureAwait(false))
+                    {
+                        return 0;
+                    }
                     break;
 
                 case Native.PMS_SSL_WANT_WRITE:
@@ -501,6 +486,8 @@ public sealed partial class BoringSslStream : Stream
 
         try
         {
+            ThrowIfDisposed();
+
             EnsureAuthenticated();
 
             using MemoryHandle handle = buffer.Pin();
@@ -580,7 +567,7 @@ public sealed partial class BoringSslStream : Stream
         }
     }
 
-    private async ValueTask ReadFromNetworkAsync(
+    private async ValueTask<bool> ReadFromNetworkAsync(
         CancellationToken cancellationToken)
     {
         byte[] buffer =
@@ -601,8 +588,7 @@ public sealed partial class BoringSslStream : Stream
 
             if (read == 0)
             {
-                throw new EndOfStreamException(
-                    "Underlying stream was closed.");
+                return false;
             }
 
             using MemoryHandle handle =
@@ -636,6 +622,8 @@ public sealed partial class BoringSslStream : Stream
         {
             ArrayPool<byte>.Shared.Return(buffer);
         }
+
+        return true;
     }
 
     /// <summary>
@@ -707,6 +695,10 @@ public sealed partial class BoringSslStream : Stream
         {
             // Disposed.
         }
+        catch (ObjectDisposedException) when (_disposed)
+        {
+            // Dispose closed the native handle
+        }
         catch (Exception ex)
         {
             failure = ex;
@@ -726,45 +718,53 @@ public sealed partial class BoringSslStream : Stream
 
             foreach (var waiter in batch)
                 waiter.TrySetException(error);
+
+            _pumpCts.Dispose();
         }
     }
 
     private async ValueTask DrainWriteBioAsync(
         CancellationToken token)
     {
-        IntPtr pointer =
-            Marshal.UnsafeAddrOfPinnedArrayElement(_pumpBuffer, 0);
-
-        while (true)
+        byte[] buffer = ArrayPool<byte>.Shared.Rent(NetworkBufferSize);
+        try
         {
-            int taken;
-            string? nativeError = null;
-
-            lock (_nativeSync)
+            while (true)
             {
-                taken = Native.pms_ssl_take_write(
-                    _connection,
-                    pointer,
-                    _pumpBuffer.Length);
+                int taken;
+                string? nativeError = null;
+
+                lock (_nativeSync)
+                {
+                    using MemoryHandle pin = buffer.AsMemory(0, NetworkBufferSize).Pin();
+                    taken = Native.pms_ssl_take_write(
+                        _connection,
+                        GetHandlePointer(pin),
+                        NetworkBufferSize);
+
+                    if (taken < 0)
+                        nativeError = GetNativeError();
+                }
 
                 if (taken < 0)
-                    nativeError = GetNativeError();
+                {
+                    throw CreateSslException(
+                        "Failed to read BoringSSL write BIO",
+                        nativeError);
+                }
+
+                if (taken == 0)
+                    return; // BIO is empty
+
+                await _innerStream.WriteAsync(
+                        buffer.AsMemory(0, taken),
+                        token)
+                    .ConfigureAwait(false);
             }
-
-            if (taken < 0)
-            {
-                throw CreateSslException(
-                    "Failed to read BoringSSL write BIO",
-                    nativeError);
-            }
-
-            if (taken == 0)
-                return; // BIO is empty
-
-            await _innerStream.WriteAsync(
-                    _pumpBuffer.AsMemory(0, taken),
-                    token)
-                .ConfigureAwait(false);
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
         }
     }
 
@@ -880,6 +880,8 @@ public sealed partial class BoringSslStream : Stream
 
         try
         {
+            ThrowIfDisposed();
+
             await FlushWriteBioAsync(
                     cancellationToken)
                 .ConfigureAwait(false);
@@ -1026,14 +1028,10 @@ public sealed partial class BoringSslStream : Stream
         _disposed = true;
         StopPump();
 
-        if (disposing)
-        {
-            _readLock.Dispose();
-            _writeLock.Dispose();
+        lock (_nativeSync) { _connection.Dispose(); }
 
-            if (!_leaveOpen)
-                _innerStream.Dispose();
-        }
+        if (disposing && !_leaveOpen)
+            _innerStream.Dispose();
 
         base.Dispose(disposing);
     }
@@ -1046,8 +1044,7 @@ public sealed partial class BoringSslStream : Stream
         _disposed = true;
         StopPump();
 
-        _readLock.Dispose();
-        _writeLock.Dispose();
+        lock (_nativeSync) { _connection.Dispose(); }
 
         if (!_leaveOpen)
         {
